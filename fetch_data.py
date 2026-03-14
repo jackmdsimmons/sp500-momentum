@@ -12,13 +12,13 @@ import yfinance as yf
 OUTPUT_DIR = "data"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "spy_daily.csv")
 TICKER = "SPY"
-PERIOD = "10y"
+START  = "1993-01-01"   # SPY inception
 
 
 def fetch():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    print(f"Downloading {TICKER} ({PERIOD})...")
-    df = yf.download(TICKER, period=PERIOD, auto_adjust=True, progress=False)
+    print(f"Downloading {TICKER} from {START}...")
+    df = yf.download(TICKER, start=START, auto_adjust=True, progress=False)
     df = df[["Close"]].rename(columns={"Close": "price"})
     df.index.name = "date"
     df.to_csv(OUTPUT_FILE)
