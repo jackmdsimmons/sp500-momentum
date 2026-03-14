@@ -1,152 +1,145 @@
 """
-Backtest each momentum metric as a simple timing signal.
+Quintile analysis of momentum metrics vs. forward returns.
 
-Signal logic:
-  - If metric > 0  → long SPY next month (invested)
-  - If metric <= 0 → cash next month (flat, 0% return)
+For each momentum metric:
+  - Sort monthly observations into quintiles (Q1=lowest, Q5=highest)
+  - Calculate mean forward return for each quintile
+  - Report Q5-Q1 spread
 
-This isolates each metric's ability to predict positive vs. negative months.
-
-Output metrics per strategy:
-  - Annualised return
-  - Annualised volatility
-  - Sharpe ratio
-  - Max drawdown
-  - Win rate (% of months correctly called)
-  - vs. buy-and-hold benchmark
+Forward horizons: 1m, 3m, 6m, 12m
 """
 
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 
 TRADING_DAYS_PER_MONTH = 21
-TRADING_DAYS_PER_YEAR  = 252
-RISK_FREE_RATE         = 0.04   # approximate annual risk-free rate
 
 
 def monthly_returns(prices: pd.Series) -> pd.Series:
-    """Resample daily prices to month-end, compute monthly returns."""
     monthly = prices.resample("ME").last()
     return monthly.pct_change().dropna()
 
 
-def build_strategy_returns(
+def forward_returns(prices: pd.Series, horizons: list[int] = [1, 3, 6, 12]) -> pd.DataFrame:
+    """
+    Compute forward returns at multiple horizons from month-end prices.
+    horizon=1 means next month's return, horizon=3 means next 3 months, etc.
+    """
+    monthly = prices.resample("ME").last()
+    fwd = pd.DataFrame(index=monthly.index)
+    for h in horizons:
+        fwd[f"fwd_{h}m"] = monthly.pct_change(h).shift(-h)
+    return fwd.dropna()
+
+
+def quintile_analysis(
     signal: pd.Series,
-    fwd_returns: pd.Series,
-) -> pd.Series:
+    fwd: pd.DataFrame,
+) -> pd.DataFrame:
     """
-    Given a daily signal and monthly forward returns,
-    align signal to month-end and shift forward one period.
+    Bin signal into quintiles, compute mean forward return per quintile.
+    Returns a DataFrame: rows = quintiles (Q1..Q5), columns = forward horizons.
     """
-    # Resample signal to month-end (use last value of month)
-    sig_monthly = signal.resample("ME").last()
+    sig_monthly = signal.resample("ME").last().shift(1)  # signal known at month-end, applied next month
+    combined = pd.concat([sig_monthly.rename("signal"), fwd], axis=1).dropna()
 
-    # Shift signal forward: today's signal → next month's position
-    position = (sig_monthly.shift(1) > 0).astype(float)
-
-    # Align to forward returns index
-    position, fwd = position.align(fwd_returns, join="inner")
-
-    strategy_returns = position * fwd
-    strategy_returns.name = signal.name
-    return strategy_returns
-
-
-def performance_stats(returns: pd.Series) -> dict:
-    """Compute annualised performance stats from monthly returns."""
-    ann_return = (1 + returns.mean()) ** 12 - 1
-    ann_vol    = returns.std() * np.sqrt(12)
-    sharpe     = (ann_return - RISK_FREE_RATE) / ann_vol if ann_vol > 0 else np.nan
-
-    cumulative = (1 + returns).cumprod()
-    rolling_max = cumulative.cummax()
-    drawdown = cumulative / rolling_max - 1
-    max_dd = drawdown.min()
-
-    win_rate = (returns > 0).mean()
-
-    return {
-        "ann_return":  round(ann_return * 100, 2),
-        "ann_vol":     round(ann_vol * 100, 2),
-        "sharpe":      round(sharpe, 3),
-        "max_drawdown": round(max_dd * 100, 2),
-        "win_rate":    round(win_rate * 100, 1),
-        "n_months":    len(returns),
-    }
-
-
-def run(prices: pd.Series, metrics: pd.DataFrame) -> pd.DataFrame:
-    """
-    Run backtest for all metrics. Returns a summary DataFrame.
-    """
-    fwd = monthly_returns(prices)
+    # Check we have enough unique values to form 5 bins
+    if combined["signal"].nunique() < 5:
+        return None
 
     results = {}
+    for col in fwd.columns:
+        combined["quintile"] = pd.qcut(
+            combined["signal"], 5, labels=["Q1","Q2","Q3","Q4","Q5"], duplicates="drop"
+        )
+        means = combined.groupby("quintile", observed=True)[col].mean() * 100
+        results[col] = means
 
-    # Benchmark: buy and hold
-    results["buy_and_hold"] = performance_stats(fwd)
+    return pd.DataFrame(results)
+
+
+def spread_table(prices: pd.Series, metrics: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each metric and each forward horizon, compute Q5-Q1 spread.
+    Returns a DataFrame: rows = metrics, columns = forward horizons.
+    """
+    fwd = forward_returns(prices)
+    spreads = {}
 
     for col in metrics.columns:
-        strat_returns = build_strategy_returns(metrics[col], fwd)
-        results[col] = performance_stats(strat_returns)
+        qt = quintile_analysis(metrics[col], fwd)
+        if qt is None:
+            continue  # skip discrete metrics like tsmom
+        spreads[col] = (qt.loc["Q5"] - qt.loc["Q1"]).round(2)
 
-    summary = pd.DataFrame(results).T
-    summary.index.name = "strategy"
-    return summary
+    return pd.DataFrame(spreads).T
 
 
-def plot_cumulative(prices: pd.Series, metrics: pd.DataFrame, top_n: int = 4):
-    """Plot cumulative returns of top strategies vs. buy-and-hold."""
-    fwd = monthly_returns(prices)
+def plot_quintile_bars(prices: pd.Series, metrics: pd.DataFrame, horizon: str = "fwd_1m"):
+    """
+    For a given forward horizon, plot mean return by quintile for each metric.
+    """
+    fwd = forward_returns(prices)
+    valid_cols = [c for c in metrics.columns if quintile_analysis(metrics[c], fwd) is not None]
+    n_metrics = len(valid_cols)
+    ncols = 4
+    nrows = int(np.ceil(n_metrics / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(16, 4 * nrows), sharey=False)
+    axes = axes.flatten()
+    colors = ["#d73027", "#fc8d59", "#fee090", "#91cf60", "#1a9850"]
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    for i, col in enumerate(valid_cols):
+        ax = axes[i]
+        qt = quintile_analysis(metrics[col], fwd)
+        vals = qt[horizon]
+        bars = ax.bar(vals.index, vals.values, color=colors)
+        ax.axhline(0, color="black", linewidth=0.8)
+        ax.set_title(col, fontsize=11)
+        ax.set_ylabel("Mean fwd return (%)" if i % ncols == 0 else "")
+        ax.tick_params(axis="x", labelsize=9)
+        ax.grid(axis="y", alpha=0.3)
 
-    # Buy and hold
-    bah = (1 + fwd).cumprod()
-    ax.plot(bah.index, bah.values, label="Buy & Hold", linewidth=2, color="black")
+        # Annotate spread
+        spread = vals["Q5"] - vals["Q1"]
+        ax.text(0.98, 0.02, f"Q5-Q1: {spread:.2f}%",
+                transform=ax.transAxes, ha="right", va="bottom",
+                fontsize=9, color="black",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
 
-    # Top N strategies by Sharpe
-    summary = run(prices, metrics)
-    top = (
-        summary.drop("buy_and_hold")
-        .sort_values("sharpe", ascending=False)
-        .head(top_n)
-        .index.tolist()
+    # Hide unused axes
+    for j in range(i + 1, len(axes)):
+        axes[j].set_visible(False)
+
+    h = horizon.replace("fwd_", "").replace("m", "")
+    fig.suptitle(f"Mean Forward {h}-Month Return by Momentum Quintile", fontsize=13, y=1.01)
+    plt.tight_layout()
+    fname = f"data/quintiles_{horizon}.png"
+    plt.savefig(fname, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Chart saved to {fname}")
+
+
+def plot_spread_heatmap(spreads: pd.DataFrame):
+    """
+    Heatmap of Q5-Q1 spread for all metrics x forward horizons.
+    """
+    fig, ax = plt.subplots(figsize=(8, 5))
+    sns.heatmap(
+        spreads.astype(float),
+        annot=True, fmt=".2f", center=0,
+        cmap="RdYlGn", ax=ax,
+        linewidths=0.5,
+        cbar_kws={"label": "Q5-Q1 spread (%)"},
     )
-
-    colors = sns.color_palette("tab10", top_n)
-    for i, col in enumerate(top):
-        strat = build_strategy_returns(metrics[col], fwd)
-        cum = (1 + strat).cumprod()
-        sharpe = summary.loc[col, "sharpe"]
-        ax.plot(cum.index, cum.values, label=f"{col} (SR={sharpe})", color=colors[i])
-
-    ax.set_title("Cumulative Returns: Top Momentum Strategies vs. Buy & Hold")
-    ax.set_ylabel("Growth of $1")
-    ax.set_xlabel("")
-    ax.legend()
-    ax.grid(alpha=0.3)
+    ax.set_title("Q5-Q1 Forward Return Spread by Metric and Horizon (%)")
+    ax.set_xlabel("Forward Horizon")
+    ax.set_ylabel("Momentum Metric")
     plt.tight_layout()
-    plt.savefig("data/cumulative_returns.png", dpi=150)
-    plt.show()
-    print("Chart saved to data/cumulative_returns.png")
-
-
-def plot_sharpe_comparison(summary: pd.DataFrame):
-    """Bar chart of Sharpe ratios across all strategies."""
-    fig, ax = plt.subplots(figsize=(10, 5))
-    sorted_summary = summary.sort_values("sharpe", ascending=True)
-    colors = ["black" if i == "buy_and_hold" else "steelblue"
-              for i in sorted_summary.index]
-    bars = ax.barh(sorted_summary.index, sorted_summary["sharpe"], color=colors)
-    ax.axvline(0, color="red", linewidth=0.8, linestyle="--")
-    ax.set_title("Sharpe Ratio by Momentum Strategy")
-    ax.set_xlabel("Sharpe Ratio")
-    ax.grid(axis="x", alpha=0.3)
-    plt.tight_layout()
-    plt.savefig("data/sharpe_comparison.png", dpi=150)
-    plt.show()
-    print("Chart saved to data/sharpe_comparison.png")
+    plt.savefig("data/spread_heatmap.png", dpi=150)
+    plt.close()
+    print("Chart saved to data/spread_heatmap.png")
