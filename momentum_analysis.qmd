@@ -63,7 +63,7 @@ from IPython.display import Image, display
 
 from fetch_data import fetch
 from momentum import compute_all
-from analytics import (
+from quant_tools.analytics import (
     align_monthly, forward_returns,
     spread_stat, information_coefficient,
     multi_signal_tranche,
@@ -198,7 +198,7 @@ outcome = fwd["fwd_3m"]
 fig, axes = plt.subplots(4, 2, figsize=(14, 12), sharey=False)
 axes = axes.flatten()
 
-from analytics import rolling_eval
+from quant_tools.analytics import rolling_eval
 
 cols = [c for c in metrics.columns if c != "tsmom"]
 for i, col in enumerate(cols):

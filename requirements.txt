@@ -5,4 +5,5 @@ matplotlib>=3.8.0
 seaborn>=0.13.0
 scipy>=1.12.0
 jupyter>=1.0.0
-quant-tools @ git+https://github.com/jackmdsimmons/quant-tools.git@v0.1.1
+# Development: pip install -e "C:/Users/jacks/Documents/quant-tools"
+# Production:  quant-tools @ git+https://github.com/jackmdsimmons/quant-tools.git@v0.1.1
