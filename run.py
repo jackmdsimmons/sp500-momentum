@@ -12,6 +12,7 @@ from backtest import (
     plot_spread_heatmap,
     plot_rolling_spread,
     plot_yearly_heatmap,
+    plot_tranche_heatmap,
 )
 
 
@@ -44,6 +45,8 @@ def main():
     plot_rolling_spread(prices, metrics, horizon="fwd_3m", window=36)
     plot_yearly_heatmap(prices, metrics, horizon="fwd_1m")
     plot_yearly_heatmap(prices, metrics, horizon="fwd_3m")
+    plot_tranche_heatmap(prices, metrics, horizon="fwd_1m")
+    plot_tranche_heatmap(prices, metrics, horizon="fwd_3m")
 
     print("\nAll charts saved to data/")
 

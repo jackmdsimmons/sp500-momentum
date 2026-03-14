@@ -1,0 +1,278 @@
+---
+title: "Momentum in the S&P 500"
+subtitle: "A Quintile Analysis, 1993–2025"
+author: "Jack Simmons"
+date: today
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    code-fold: true
+    code-summary: "Show code"
+    fig-align: center
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+  echo: true
+jupyter: python3
+---
+
+## Introduction
+
+Price momentum — the tendency for assets that have performed well recently to continue
+outperforming — is one of the most replicated findings in empirical finance. Jegadeesh
+and Titman (1993) documented it in U.S. equities; it has since been found across asset
+classes and geographies.
+
+This analysis examines momentum at the **index level** using the S&P 500 (proxied by
+SPY from its 1993 inception). Rather than asking whether a momentum *strategy* beats
+buy-and-hold — an unfair contest during a 30-year bull market — we ask a more precise
+question:
+
+> *Within the distribution of monthly momentum signals observed since 1993, do months
+> with high signals predict meaningfully higher forward returns than months with low
+> signals?*
+
+The framework is quintile analysis: for each metric, we bin all monthly observations
+into five equal groups and measure mean forward returns per group. The Q5–Q1 spread
+is our primary measure of signal efficacy.
+
+---
+
+## Data
+
+SPY adjusted-close daily prices from January 1993 to present, sourced via
+`yfinance`. Adjusted close accounts for dividends and splits, approximating a
+total return series.
+
+```{python}
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath("momentum_analysis.qmd")))
+
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+from IPython.display import Image, display
+
+from fetch_data import fetch
+from momentum import compute_all
+from analytics import (
+    align_monthly, forward_returns,
+    spread_stat, information_coefficient,
+    multi_signal_tranche,
+)
+from backtest import (
+    spread_table, quintile_analysis,
+    plot_quintile_bars, plot_spread_heatmap,
+    plot_tranche_heatmap, plot_rolling_spread,
+)
+
+prices_df = fetch()
+prices = prices_df["price"].squeeze()
+metrics = compute_all(prices)
+fwd = forward_returns(prices)
+
+print(f"Daily observations : {len(prices):,}")
+print(f"Date range         : {prices.index[0].date()} to {prices.index[-1].date()}")
+print(f"Monthly obs (fwd)  : {len(fwd):,}")
+```
+
+---
+
+## Momentum Metrics
+
+Eight metrics are computed from the daily price series. They fall into three families:
+
+| Metric | Formula | Intuition |
+|---|---|---|
+| `mom_12_1` | Return(t–12m → t–1m) | Classic Jegadeesh-Titman: 12-month momentum skipping the most recent month to avoid short-term reversal |
+| `mom_6_1` | Return(t–6m → t–1m) | Shorter lookback; more responsive to recent trends |
+| `mom_3_1` | Return(t–3m → t–1m) | Short-term momentum |
+| `mom_1` | Return(t–1m → t) | Raw 1-month return; often reverses |
+| `ma_ratio` | Price / 200-day MA – 1 | Trend-following: distance above/below long-run average |
+| `high_52w` | Price / 52-week high – 0.95 | Proximity to annual high; >0 means within 5% |
+| `risk_adj` | mom_12_1 / realised vol | Volatility-adjusted momentum (Sharpe-like) |
+| `tsmom` | sign(mom_12_1) | Binary: +1 (positive trend) or –1 (negative) |
+
+```{python}
+print("Metrics computed:", list(metrics.columns))
+print(f"\nSample (last 5 rows):")
+print(metrics.tail().round(4).to_string())
+```
+
+---
+
+## Analytical Framework
+
+For each metric and each forward return horizon (1m, 3m, 6m, 12m):
+
+1. **Align**: Resample the signal to month-end. Lag by one month so the signal is
+   observable *before* the forward return period begins — no look-ahead bias.
+2. **Bin**: Divide the full sample into quintiles (Q1 = lowest signal, Q5 = highest).
+3. **Measure**: Compute mean forward return within each quintile.
+4. **Summarise**: Report the Q5–Q1 spread as a scalar measure of predictive power.
+
+`tsmom` is excluded from quintile analysis (only two unique values; cannot form
+five bins). It is assessed via hit rate instead.
+
+---
+
+## Full-Period Results
+
+### Q5–Q1 Spread Heatmap
+
+The heatmap below shows the Q5–Q1 spread (%) across all metrics and forward horizons
+over the full 1993–2025 sample. Green = higher-signal months predicted higher returns;
+red = the opposite.
+
+```{python}
+spreads = spread_table(prices, metrics)
+plot_spread_heatmap(spreads)
+display(Image("data/spread_heatmap.png"))
+```
+
+**Key observations:**
+
+- `mom_6_1` and `ma_ratio` show the strongest and most consistent positive spreads,
+  particularly at 3m and 6m horizons.
+- `mom_1` is negative at short horizons — a textbook short-term reversal effect.
+- `high_52w` and `risk_adj` show modest spreads; the former is noisy, the latter
+  largely redundant with `mom_12_1`.
+
+### Quintile Return Profiles (3-Month Horizon)
+
+The bar charts below show the full distribution — mean return for each quintile, not
+just the top and bottom — at the 3-month forward horizon.
+
+```{python}
+plot_quintile_bars(prices, metrics, horizon="fwd_3m")
+display(Image("data/quintiles_fwd_3m.png"))
+```
+
+A well-behaved signal produces a monotone staircase from Q1 to Q5. `mom_6_1` and
+`ma_ratio` come closest to this; `mom_1` inverts it.
+
+---
+
+## Time Dependency
+
+A positive full-period spread can mask substantial regime variation. A signal that
+worked strongly in one era and failed in another is less reliable than one that is
+consistently positive. We examine this two ways.
+
+### 5-Year Tranche Heatmap
+
+Each cell is the Q5–Q1 spread within that 5-year window, using 20th/80th percentile
+cutoffs. With ~60 monthly observations per cell, estimates are more stable than
+year-by-year.
+
+```{python}
+plot_tranche_heatmap(prices, metrics, horizon="fwd_3m", tranche_years=5)
+display(Image("data/tranche_heatmap_fwd_3m_5y.png"))
+```
+
+**Key observations:**
+
+- No metric is green across all tranches — regime dependence is universal.
+- `mom_6_1` is the most consistent: positive in 4 of 7 tranches, and the trend
+  since 2013 is notably green.
+- The 2003–2012 period was broadly hostile to momentum at the index level, likely
+  reflecting the two major bear-market reversals (dot-com, GFC).
+- `high_52w` is structurally weak — negative or near-zero in most periods.
+
+### Rolling 36-Month Information Coefficient
+
+The IC (Spearman rank correlation between signal and forward return) computed over
+a rolling 36-month window shows how signal quality evolves continuously over time.
+
+```{python}
+# Compute rolling IC for each metric vs 3m forward return
+outcome = fwd["fwd_3m"]
+fig, axes = plt.subplots(4, 2, figsize=(14, 12), sharey=False)
+axes = axes.flatten()
+
+from analytics import rolling_eval
+
+cols = [c for c in metrics.columns if c != "tsmom"]
+for i, col in enumerate(cols):
+    aligned = align_monthly(metrics[col], outcome, lag=1)
+    rolling_ic = rolling_eval(
+        aligned["signal"], aligned["outcome"],
+        information_coefficient, window=36
+    )
+    ax = axes[i]
+    s = rolling_ic.dropna()
+    ax.plot(s.index, s.values, color="steelblue", linewidth=1.2)
+    ax.axhline(0, color="red", linewidth=0.8, linestyle="--")
+    ax.fill_between(s.index, s.values, 0, where=s.values > 0, alpha=0.15, color="green")
+    ax.fill_between(s.index, s.values, 0, where=s.values < 0, alpha=0.15, color="red")
+    ax.set_title(col, fontsize=11)
+    ax.set_ylabel("IC (Spearman)")
+    ax.grid(alpha=0.3)
+
+for j in range(i + 1, len(axes)):
+    axes[j].set_visible(False)
+
+fig.suptitle("36-Month Rolling IC vs 3-Month Forward Return", fontsize=13, y=1.01)
+plt.tight_layout()
+plt.savefig("data/rolling_ic_3m.png", dpi=150, bbox_inches="tight")
+plt.close()
+display(Image("data/rolling_ic_3m.png"))
+```
+
+The rolling IC reveals what the tranche heatmap compresses: `mom_6_1` has been
+positively correlated with 3-month forward returns for most of the post-2013 period,
+with IC values persistently in the 0.1–0.3 range — economically meaningful for a
+single-factor signal.
+
+---
+
+## Summary Statistics
+
+```{python}
+rows = []
+for col in [c for c in metrics.columns if c != "tsmom"]:
+    aligned = align_monthly(metrics[col], outcome, lag=1)
+    s  = spread_stat(aligned["signal"], aligned["outcome"]) * 100
+    ic = information_coefficient(aligned["signal"], aligned["outcome"])
+    rows.append({"Metric": col, "Spread (%, 3m)": round(s, 2), "IC (Spearman)": round(ic, 3)})
+
+summary = pd.DataFrame(rows).set_index("Metric").sort_values("IC (Spearman)", ascending=False)
+print(summary.to_string())
+```
+
+---
+
+## Conclusions
+
+Three findings stand out from the 1993–2025 analysis:
+
+**1. `mom_6_1` is the most robust momentum signal at the index level.**
+A 6-month lookback (skipping the most recent month) produces the highest IC and the
+most consistent Q5–Q1 spread across 5-year tranches. The signal has strengthened
+since 2013, not weakened — counter to common assumptions about momentum decay.
+
+**2. Short-term reversal is real but fading.**
+`mom_1` (raw 1-month return) is negatively predictive at 1-month horizon — high
+recent returns predict slightly lower near-term returns. However, the rolling IC
+trend is flat toward zero, suggesting the effect has diminished as markets became
+more efficient.
+
+**3. No signal is regime-stable.**
+Every metric spent extended periods (2003–2012 in particular) with near-zero or
+negative spreads. This argues against using any single momentum metric as a
+standalone timing rule, and in favour of treating them as probabilistic inputs to
+a broader framework.
+
+---
+
+*Analysis produced using SPY adjusted-close data via yfinance. All forward returns
+computed on a look-ahead-free basis with a one-month signal lag. Code available at
+[github.com/jackmdsimmons/sp500-momentum](https://github.com/jackmdsimmons/sp500-momentum).*

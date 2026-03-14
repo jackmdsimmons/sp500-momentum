@@ -279,3 +279,71 @@ def plot_yearly_heatmap(
     plt.savefig(fname, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Chart saved to {fname}")
+
+
+def plot_tranche_heatmap(
+    prices: pd.Series,
+    metrics: pd.DataFrame,
+    horizon: str = "fwd_1m",
+    tranche_years: int = 5,
+):
+    """
+    Heatmap: rows = metrics, columns = 5-year tranches, cells = Q5-Q1 spread.
+    More statistically robust than yearly (60 obs per cell vs 12).
+    """
+    fwd = forward_returns(prices)
+    valid_cols = [c for c in metrics.columns if quintile_analysis(metrics[c], fwd) is not None]
+
+    # Build tranche labels from data range
+    start_year = prices.index.year.min()
+    end_year = prices.index.year.max()
+    tranche_starts = range(start_year, end_year + 1, tranche_years)
+    tranche_labels = [
+        f"{y}-{min(y + tranche_years - 1, end_year)}"
+        for y in tranche_starts
+    ]
+
+    def get_tranche(year):
+        for i, y in enumerate(tranche_starts):
+            if year < y + tranche_years:
+                return tranche_labels[i]
+        return tranche_labels[-1]
+
+    tranche_data = {}
+    for col in valid_cols:
+        sig_monthly = metrics[col].resample("ME").last().shift(1)
+        combined = pd.concat([sig_monthly.rename("signal"), fwd[horizon]], axis=1).dropna()
+        combined["tranche"] = combined.index.year.map(get_tranche)
+
+        row = {}
+        for tranche, grp in combined.groupby("tranche"):
+            if grp["signal"].nunique() < 5 or len(grp) < 10:
+                continue
+            lo = grp["signal"].quantile(0.20)
+            hi = grp["signal"].quantile(0.80)
+            q1_ret = grp.loc[grp["signal"] <= lo, horizon].mean() * 100
+            q5_ret = grp.loc[grp["signal"] >= hi, horizon].mean() * 100
+            row[tranche] = round(q5_ret - q1_ret, 2)
+        tranche_data[col] = row
+
+    df = pd.DataFrame(tranche_data).T
+    # Preserve chronological column order
+    df = df[[l for l in tranche_labels if l in df.columns]]
+
+    fig, ax = plt.subplots(figsize=(max(10, len(df.columns) * 1.4), 5))
+    sns.heatmap(
+        df.astype(float),
+        annot=True, fmt=".1f", center=0,
+        cmap="RdYlGn", ax=ax,
+        linewidths=0.5,
+        cbar_kws={"label": "Q5-Q1 spread (%)"},
+    )
+    h = horizon.replace("fwd_", "").replace("m", "")
+    ax.set_title(f"Q5-Q1 Spread by Metric and {tranche_years}-Year Tranche — {h}-Month Forward Return (%)")
+    ax.set_xlabel(f"{tranche_years}-Year Period")
+    ax.set_ylabel("")
+    plt.tight_layout()
+    fname = f"data/tranche_heatmap_{horizon}_{tranche_years}y.png"
+    plt.savefig(fname, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Chart saved to {fname}")
